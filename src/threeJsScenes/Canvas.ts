@@ -1,11 +1,11 @@
-import * as THREE from 'three/webgpu';
+import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/Addons.js';
 
 export default class Canvas {
     element: HTMLCanvasElement;
     scene: THREE.Scene;
     camera!: THREE.PerspectiveCamera;
-    renderer!: THREE.WebGPURenderer;
+    renderer!: THREE.WebGLRenderer;
     time: number;
     clock: THREE.Clock;
     dimensions!: { width: number; height: number; pixelRatio: number };
@@ -64,11 +64,26 @@ export default class Canvas {
             height: window.innerHeight,
             pixelRatio: Math.min(2, window.devicePixelRatio)
         };
-        this.renderer = new THREE.WebGPURenderer({
+        this.renderer = new THREE.WebGLRenderer({
             canvas: this.element,
             alpha: false,
             antialias: true
         });
+        this.renderer.setSize(this.dimensions.width, this.dimensions.height);
+        this.renderer.render(this.scene, this.camera);
+        this.renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
+    }
+
+    getRenderTarget() {
+        const renderTarget = new THREE.WebGLRenderTarget(this.dimensions.width, this.dimensions.height, {
+            minFilter: THREE.NearestFilter,
+            magFilter: THREE.NearestFilter,
+            format: THREE.RGBAFormat,
+            type: THREE.FloatType,
+            depthBuffer: true,
+            stencilBuffer: false
+        });
+        return renderTarget;
     }
 
     getTime() {
@@ -119,23 +134,6 @@ export default class Canvas {
         const helper = new THREE.CameraHelper(this.camera);
         this.scene.add(helper);
     }
-
-    async init(){
-            await this.renderer.init(); 
-            this.renderer.setSize(this.dimensions.width, this.dimensions.height);
-            this.renderer.render(this.scene, this.camera);
-            this.renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
-    }
-    
-    // getRenderTarget() {
-    //     const renderTarget = new THREE.WebGPURenderTarget(this.dimensions.width, this.dimensions.height, {
-    //         format: THREE.RGBAFormat,
-    //         type: THREE.UnsignedByteType,
-    //         depthBuffer: true,
-    //         stencilBuffer: false
-    //     });
-    //     return renderTarget;
-    // }
 
     render(scroll?: number) {
         this.time = this.clock.getElapsedTime();

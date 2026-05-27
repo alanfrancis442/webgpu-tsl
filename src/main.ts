@@ -1,19 +1,15 @@
 import './style.css'
-import Canvas from './Canvas'
+import Canvas from './threeJsScenes/Canvas';
+import Particles from './threeJsScenes/Particles';
 
 const canvas = new Canvas();
-canvas.addDebugHelpers();
-canvas.addSimpleMesh();
+new Particles(canvas.scene, canvas.renderer);
 canvas.addLight();
 canvas.addGridHelper();
 canvas.addOrbitControls();
-await canvas.init();
 function animate() {
     requestAnimationFrame(animate);
-    canvas.time = canvas.clock.getElapsedTime();
-    if(canvas.renderer){
-        canvas.render()
-    }
+    canvas.render();
 }
 
 animate();
