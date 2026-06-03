@@ -86,6 +86,17 @@ export default class Canvas {
         return renderTarget;
     }
 
+    getParticleRenderTarget(size: number) {
+        return new THREE.WebGLRenderTarget(size, size, {
+            minFilter: THREE.NearestFilter,
+            magFilter: THREE.NearestFilter,
+            format: THREE.RGBAFormat,
+            type: THREE.FloatType,
+            depthBuffer: false,
+            stencilBuffer: false,
+        });
+    }
+
     getTime() {
         return this.time;
     }

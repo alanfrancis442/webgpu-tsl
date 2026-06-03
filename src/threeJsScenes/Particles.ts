@@ -2,68 +2,96 @@ import * as THREE from 'three';
 import Canvas from './Canvas';
 import simVert from './shaders/simVert';
 import simFrag from './shaders/simFrag';
-
-const PARTICLE_COUNT = 100000;
-
-const material = new THREE.SpriteMaterial({
-    color: 0xffffff,
-    transparent: true,
-    depthWrite: false,
-    blending: THREE.AdditiveBlending,
-});
-
-const sprite = new THREE.Sprite(material);
-sprite.scale.set(0.5, 0.5, 1);
-sprite.position.set(0, 1, 0);
+import vertexShader from './shaders/vertex';
+import fragmentShader from './shaders/fragment';
 
 export default class Particles {
+    canvas: Canvas;
     scene: THREE.Scene;
+    camera: THREE.Camera;
     renderer: THREE.WebGLRenderer;
-    fbo: THREE.WebGLRenderTarget;
-    fbo1: THREE.WebGLRenderTarget;
-    fboScene: THREE.Scene;
-    fboCamera: THREE.OrthographicCamera;
-    fboMaterial: THREE.ShaderMaterial;
-    points: THREE.Points;
-    data: Float32Array;
+    raycaster: THREE.Raycaster;
+    mouse: THREE.Vector2;
+    mouseWorld: THREE.Vector3;
+    interactionPlane: THREE.Plane;
+    fbo!: THREE.WebGLRenderTarget;
+    fbo1!: THREE.WebGLRenderTarget;
+    fboScene!: THREE.Scene;
+    fboCamera!: THREE.OrthographicCamera;
+    fboMaterial!: THREE.ShaderMaterial;
+    fboTexture!: THREE.DataTexture;
+    info!: THREE.DataTexture;
+    infoArray!: Float32Array;
+    material!: THREE.ShaderMaterial;
+    points!: THREE.Points;
+    data!: Float32Array;
     particleCount: number;
-    count: number;
+    count!: number;
+    seeded: boolean;
 
-    constructor(scene: THREE.Scene, renderer: THREE.WebGLRenderer) {
-        this.scene = scene;
-        this.renderer = renderer;
-        this.particleCount = 128;
+    constructor(canvas: Canvas) {
+        this.canvas = canvas;
+        this.scene = canvas.scene;
+        this.camera = canvas.camera;
+        this.renderer = canvas.renderer;
+        this.raycaster = new THREE.Raycaster();
+        this.mouse = new THREE.Vector2(0, 0);
+        this.mouseWorld = new THREE.Vector3(0, 0, 0);
+        this.interactionPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+        this.particleCount = 256;
+        this.seeded = false;
         this.setupFBO();
         this.initPoints();
-        // this.addParticles();
+        this.initRaycaster();
+    }
+
+    initRaycaster() {
+        const canvas = this.canvas.element;
+
+        const onPointerMove = (event: PointerEvent) => {
+            const rect = canvas.getBoundingClientRect();
+            this.mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+            this.mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+
+            this.raycaster.setFromCamera(this.mouse, this.camera);
+
+            // Particles live in the XY plane (z = 0); raycast that plane, not the grid (XZ).
+            const hit = this.raycaster.ray.intersectPlane(this.interactionPlane, this.mouseWorld);
+            if (hit !== null) {
+                this.fboMaterial.uniforms.uMouse.value.set(hit.x, hit.y);
+            }
+        };
+
+        canvas.addEventListener('pointermove', onPointerMove);
     }
 
     setupFBO() {
-        this.fbo = this.renderer.getRenderTarget();
-        this.fbo1 = this.renderer.getRenderTarget();
+        const size = this.particleCount;
+        this.fbo = this.canvas.getParticleRenderTarget(size);
+        this.fbo1 = this.canvas.getParticleRenderTarget(size);
 
         this.fboScene = new THREE.Scene();
         this.fboCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-        this.fboCamera.position.set(0, 0, 0.5);
-        this.fboCamera.lookAt(0, 0, 0);
 
-        let geometry = new THREE.PlaneGeometry(2, 2);
+        const geometry = new THREE.PlaneGeometry(2, 2);
         this.fboMaterial = new THREE.ShaderMaterial({
             vertexShader: simVert,
             fragmentShader: simFrag,
             uniforms: {
                 uPositions: { value: null },
-                uVelocities: { value: null },
-                time: { value: null },
+                uTime: { value: 0 },
+                uInfo: { value: null },
+                uMouse: { value: new THREE.Vector2(0, 0) },
             },
         });
-        this.data = new Float32Array(this.particleCount * this.particleCount * 4);
 
-        for (let i = 0; i < this.particleCount; i++) {
-            for (let j = 0; j < this.particleCount; j++) {
-                let index = (i * this.particleCount + j) * 4;
-                let theta = Math.random() * 2 * Math.PI;
-                let radius = Math.random() * 0.5 + 0.5;
+        this.data = new Float32Array(size * size * 4);
+
+        for (let y = 0; y < size; y++) {
+            for (let x = 0; x < size; x++) {
+                const index = (y * size + x) * 4;
+                const theta = Math.random() * 2 * Math.PI;
+                const radius = Math.random() * 0.5 + 0.5;
                 this.data[index] = radius * Math.cos(theta);
                 this.data[index + 1] = radius * Math.sin(theta);
                 this.data[index + 2] = 0.0;
@@ -71,42 +99,97 @@ export default class Particles {
             }
         }
 
-        // let texture = new THREE.DataTexture(this.data, this.particleCount, this.particleCount, THREE.RGBAFormat, THREE.FloatType);
-        // texture.needsUpdate = true;
 
-        // this.fboMaterial.uniforms.uPositions.value = texture;
-        // this.fboMaterial.uniforms.time.value = 0;
 
-        // let mesh = new THREE.Mesh(geometry, this.fboMaterial);
-        // this.fboScene.add(mesh);
+        this.fboTexture = new THREE.DataTexture(
+            this.data,
+            size,
+            size,
+            THREE.RGBAFormat,
+            THREE.FloatType,
+        );
+        this.fboTexture.minFilter = THREE.NearestFilter;
+        this.fboTexture.magFilter = THREE.NearestFilter;
+        this.fboTexture.needsUpdate = true;
+
+
+        this.infoArray = new Float32Array(size * size * 4);
+
+        for (let y = 0; y < size; y++) {
+            for (let x = 0; x < size; x++) {
+                const index = (y * size + x) * 4;
+                this.infoArray[index] = Math.random() + 0.5;
+                this.infoArray[index + 1] = Math.random() + 0.5;
+                this.infoArray[index + 2] = 0.0;
+                this.infoArray[index + 3] = 0.0;
+            }
+        }
+
+        this.info = new THREE.DataTexture(
+            this.infoArray,
+            size,
+            size,
+            THREE.RGBAFormat,
+            THREE.FloatType,
+        );
+        this.info.minFilter = THREE.NearestFilter;
+        this.info.magFilter = THREE.NearestFilter;
+        this.info.needsUpdate = true;
+        this.fboMaterial.uniforms.uInfo.value = this.info;
+
+        const mesh = new THREE.Mesh(geometry, this.fboMaterial);
+        this.fboScene.add(mesh);
     }
 
     initPoints() {
         const bufferGeometry = new THREE.BufferGeometry();
+        this.material = new THREE.ShaderMaterial({
+            vertexShader,
+            fragmentShader,
+            uniforms: {
+                uPositions: { value: this.fboTexture },
+                uTime: { value: 0 },
+            },
+        });
 
-        this.count = this.particleCount * this.particleCount;
-        let positions = new Float32Array(this.count * 3);
-        let uv = new Float32Array(this.count * 2);
+        const size = this.particleCount;
+        this.count = size * size;
+        const positions = new Float32Array(this.count * 3);
+        const uv = new Float32Array(this.count * 2);
 
-        for (let i = 0; i < this.count; i++) {
-            for (let j = 0; j < this.particleCount; j++) {
-                let index = (i + this.count * j);
-                positions[index * 3] = Math.random() * 2 - 1;
-                positions[index * 3 + 1] = Math.random() * 2 - 1;
+        for (let y = 0; y < size; y++) {
+            for (let x = 0; x < size; x++) {
+                const index = y * size + x;
+                positions[index * 3] = 0;
+                positions[index * 3 + 1] = 0;
                 positions[index * 3 + 2] = 0;
-                uv[index * 2] = i / this.particleCount;
-                uv[index * 2 + 1] = j / this.particleCount;
+                uv[index * 2] = (x + 0.5) / size;
+                uv[index * 2 + 1] = (y + 0.5) / size;
             }
         }
 
         bufferGeometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
         bufferGeometry.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
-        this.points = new THREE.Points(bufferGeometry, this.fboMaterial);
+        this.points = new THREE.Points(bufferGeometry, this.material);
         this.scene.add(this.points);
     }
 
+    update() {
+        const readTexture = this.seeded ? this.fbo1.texture : this.fboTexture;
+        this.fboMaterial.uniforms.uPositions.value = readTexture;
+        this.material.uniforms.uPositions.value = this.fbo.texture;
+        this.fboMaterial.uniforms.uTime.value += 0.01;
+        this.material.uniforms.uTime.value += 0.01
 
-    addParticles() {
-        this.scene.add(sprite);
+        this.renderer.setRenderTarget(this.fbo);
+        this.renderer.render(this.fboScene, this.fboCamera);
+        this.renderer.setRenderTarget(null);
+        this.renderer.render(this.scene, this.camera);
+
+        this.seeded = true;
+
+        const temp = this.fbo;
+        this.fbo = this.fbo1;
+        this.fbo1 = temp;
     }
 }
