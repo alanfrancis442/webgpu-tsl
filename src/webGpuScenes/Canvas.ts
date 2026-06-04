@@ -121,22 +121,23 @@ export default class Canvas {
         this.scene.add(helper);
     }
 
-    async init(){
-            await this.renderer.init(); 
-            this.renderer.setSize(this.dimensions.width, this.dimensions.height);
-            this.renderer.render(this.scene, this.camera);
-            this.renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
+    async init() {
+        await this.renderer.init();
+        this.renderer.setSize(this.dimensions.width, this.dimensions.height);
+        this.renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
+        this.renderer.render(this.scene, this.camera);
     }
-    
-    // getRenderTarget() {
-    //     const renderTarget = new THREE.WebGPURenderTarget(this.dimensions.width, this.dimensions.height, {
-    //         format: THREE.RGBAFormat,
-    //         type: THREE.UnsignedByteType,
-    //         depthBuffer: true,
-    //         stencilBuffer: false
-    //     });
-    //     return renderTarget;
-    // }
+
+    getParticleRenderTarget(size: number) {
+        return new THREE.RenderTarget(size, size, {
+            minFilter: THREE.NearestFilter,
+            magFilter: THREE.NearestFilter,
+            format: THREE.RGBAFormat,
+            type: THREE.FloatType,
+            depthBuffer: false,
+            stencilBuffer: false,
+        });
+    }
 
     render(scroll?: number) {
         this.time = this.clock.getElapsedTime();

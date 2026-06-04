@@ -10,7 +10,7 @@ const vertexShader = `
         
         float angle = atan(pos.y, pos.x);
 
-        float shade = 0.5 + 0.45 * sin(angle - uTime);
+        float shade = 0.5 + 0.45 * sin(angle + uTime);
         vColor = vec4(vec3(shade), 1.0);
         gl_PointSize = 2.0*(1.0/-mvPosition.z);
         gl_Position = projectionMatrix * mvPosition;                
