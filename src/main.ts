@@ -10,6 +10,7 @@ canvas.addOrbitControls();
 function animate() {
     requestAnimationFrame(animate);
     canvas.controls.update();
+    canvas.render();
     particles.update();
 }
 

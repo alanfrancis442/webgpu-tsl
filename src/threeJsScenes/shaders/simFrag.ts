@@ -130,7 +130,7 @@ const simFrag = `
         vec3 targetPos = vec3(cos(angle), sin(angle), 0.0)*radius;
         
         pos.xy += (targetPos.xy-pos.xy)*0.1;
-        // pos.xy+=curl(pos.xyz*2.0, uTime*0.1, 0.1).xy*0.001;
+        pos.xy+=curl(pos.xyz*2.0, uTime*0.1, 0.1).xy*0.003;
 
         float distToMouse = length(pos.xy - mouse);
         if (distToMouse > 0.0001) {

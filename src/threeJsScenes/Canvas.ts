@@ -146,7 +146,7 @@ export default class Canvas {
         this.scene.add(helper);
     }
 
-    render(scroll?: number) {
+    render() {
         this.time = this.clock.getElapsedTime();
 
         this.renderer.render(this.scene, this.camera);
