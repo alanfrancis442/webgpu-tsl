@@ -1,5 +1,9 @@
 import * as THREE from 'three/webgpu';
+import { pass, uniform } from 'three/tsl';
+import { bloom } from 'three/addons/tsl/display/BloomNode.js';
+import { dof } from 'three/addons/tsl/display/DepthOfFieldNode.js';
 import { OrbitControls } from 'three/examples/jsm/Addons.js';
+import { HDRLoader } from 'three/examples/jsm/Addons.js';
 
 export default class Canvas {
     element: HTMLCanvasElement;
@@ -11,14 +15,20 @@ export default class Canvas {
     dimensions!: { width: number; height: number; pixelRatio: number };
     sizes!: { width: number; height: number };
     controls!: OrbitControls;
+    renderPipeline!: THREE.RenderPipeline;
+    bloomPass!: ReturnType<typeof bloom>;
+    dofPass!: ReturnType<typeof dof>;
+    dofFocus!: THREE.UniformNode<'float', number>;
+    dofFocalLength!: THREE.UniformNode<'float', number>;
+    dofBokehScale!: THREE.UniformNode<'float', number>;
     constructor() {
         this.element = document.createElement('canvas');
         this.element.classList.add('webgl');
         document.body.appendChild(this.element);
         this.scene = new THREE.Scene();
-        this.scene.background = new THREE.Color(0x0a0a12);
         this.time = 0;
         this.clock = new THREE.Clock();
+        this.addHDRTexture();
         this.createCamera();
         this.createRender();
         this.setSizes();
@@ -47,6 +57,15 @@ export default class Canvas {
         this.camera.position.set(0, 0, 10);
     }
 
+    addHDRTexture() {
+        const loader = new HDRLoader();
+        loader.load('https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/the_sky_is_on_fire_1k.hdr', (texture) => {
+            // this.scene.background = texture;
+            this.scene.environment = texture;
+            this.scene.environment.mapping = THREE.EquirectangularReflectionMapping;
+        });
+    }
+
     setSizes() {
         let fov = this.camera.fov * (Math.PI / 180);
         let height = this.camera.position.z * Math.tan(fov / 2) * 2;
@@ -67,8 +86,12 @@ export default class Canvas {
         this.renderer = new THREE.WebGPURenderer({
             canvas: this.element,
             alpha: false,
-            antialias: true
+            antialias: false,
         });
+
+        this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        this.renderer.toneMappingExposure = 1.0;
+        this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     }
 
     getTime() {
@@ -128,7 +151,31 @@ export default class Canvas {
         await this.renderer.init();
         this.renderer.setSize(this.dimensions.width, this.dimensions.height);
         this.renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
-        this.renderer.render(this.scene, this.camera);
+        this.setupPostProcessing();
+        this.renderPipeline.render();
+    }
+
+    private setupPostProcessing() {
+        this.renderPipeline = new THREE.RenderPipeline(this.renderer);
+
+        const scenePass = pass(this.scene, this.camera);
+        const sceneColor = scenePass.getTextureNode('output');
+        const viewZ = scenePass.getViewZNode();
+
+        this.dofFocus = uniform(9.0);
+        this.dofFocalLength = uniform(2.5);
+        this.dofBokehScale = uniform(1.2);
+
+        this.dofPass = dof(
+            sceneColor,
+            viewZ,
+            this.dofFocus,
+            this.dofFocalLength,
+            this.dofBokehScale,
+        );
+
+        this.bloomPass = bloom(this.dofPass, 0.4, 0.4, 0.1);
+        this.renderPipeline.outputNode = (this.dofPass as unknown as typeof sceneColor).add(this.bloomPass);
     }
 
     getParticleRenderTarget(size: number) {
@@ -144,7 +191,6 @@ export default class Canvas {
 
     render() {
         this.time = this.clock.getElapsedTime();
-
-        this.renderer.render(this.scene, this.camera);
+        this.renderPipeline.render();
     }
 }

@@ -9,9 +9,10 @@ canvas.addLight();
 canvas.addOrbitControls();
 
 await canvas.init();
+particles.setupPostFxGui(canvas);
 
 try {
-    await particles.loadModel('/Triangle.glb');
+    await particles.loadModel('/tux.glb', false);
 } catch (error) {
     console.error('Failed to load model:', error);
 }

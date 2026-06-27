@@ -10,7 +10,7 @@ import {
 } from 'three/tsl';
 import type Canvas from './Canvas';
 
-const PARTICLE_COUNT = 20000;
+const PARTICLE_COUNT = 10000;
 const MOVE_TIMEOUT = 0.06;
 
 type GeometryData = {
@@ -71,18 +71,19 @@ export default class Particles {
     private mouseMoving = false;
     private mouseEverMoved = false;
     private moveTimer = 0;
-    private springStiffness = 5.0;
-    private springDamping = 3.0;
-    private pushStrength = 12.0;
-    private mouseLerp = 6.0;
+    private springStiffness = 9.7;
+    private springDamping = 6.7;
+    private pushStrength = 10.8;
+    private mouseLerp = 9.4;
     private mouseGlowDecay = 1.5;
 
     // Compute passes
     private computeInit!: THREE.ComputeNode;
     private computeUpdate!: THREE.ComputeNode;
 
-    private mesh!: THREE.InstancedMesh;
+    private mesh?: THREE.InstancedMesh;
     private gui!: GUI;
+    private isReady = false;
 
     constructor(canvas: Canvas) {
         this.canvas = canvas;
@@ -90,21 +91,21 @@ export default class Particles {
         this.renderer = canvas.renderer;
 
         this.uTime = uniform(0);
-        this.noiseAmp = uniform(0.08);
-        this.noiseScale = uniform(0.6);
-        this.noiseSpeed = uniform(0.15);
+        this.noiseAmp = uniform(0.156);
+        this.noiseScale = uniform(0.97);
+        this.noiseSpeed = uniform(0.47);
         this.noiseGain = uniform(0.5);
-        this.maskScale = uniform(0.4);
-        this.maskSpeed = uniform(0.04);
-        this.maskContrast = uniform(1.5);
+        this.maskScale = uniform(0.72);
+        this.maskSpeed = uniform(0.195);
+        this.maskContrast = uniform(1.99);
         this.sphereSize = uniform(0.01);
         this.particleColor = uniform(new THREE.Color(0x8aa0b8));
 
         this.mousePos = uniform(new THREE.Vector3());
         this.mouseVel = uniform(new THREE.Vector3());
-        this.mouseRadius = uniform(1.5);
-        this.mouseStrength = uniform(0.6);
-        this.mouseScatter = uniform(0.6);
+        this.mouseRadius = uniform(1.45);
+        this.mouseStrength = uniform(0.23);
+        this.mouseScatter = uniform(0.21);
         this.mouseGlowColor = uniform(new THREE.Color(0xffffff));
         this.mouseGlowPassive = uniform(0.0);
         this.mouseGlowActive = uniform(1.5);
@@ -250,6 +251,20 @@ export default class Particles {
             this.mouseGlowColor.value.set(value);
         });
         mouse.open();
+    }
+
+    setupPostFxGui(canvas: Canvas) {
+        const bloomFolder = this.gui.addFolder('Bloom');
+        bloomFolder.add(canvas.bloomPass.strength, 'value', 0, 3, 0.01).name('strength');
+        bloomFolder.add(canvas.bloomPass.radius, 'value', 0, 1, 0.01).name('radius');
+        bloomFolder.add(canvas.bloomPass.threshold, 'value', 0, 1, 0.01).name('threshold');
+        bloomFolder.open();
+
+        const dofFolder = this.gui.addFolder('Depth of Field');
+        dofFolder.add(canvas.dofFocus, 'value', 1, 30, 0.1).name('focus');
+        dofFolder.add(canvas.dofFocalLength, 'value', 0.1, 15, 0.1).name('focal length');
+        dofFolder.add(canvas.dofBokehScale, 'value', 0, 5, 0.01).name('bokeh scale');
+        dofFolder.open();
     }
 
     private sampleGLBGeometry(gltf: THREE.Object3D): GeometryData {
@@ -426,7 +441,7 @@ export default class Particles {
         })().compute(PARTICLE_COUNT);
 
         const sphereGeometry = new THREE.IcosahedronGeometry(1, 0);
-        const material = new THREE.MeshBasicNodeMaterial();
+        const material = new THREE.MeshStandardNodeMaterial();
 
         material.positionNode = positions
             .element(instanceIndex)
@@ -453,23 +468,34 @@ export default class Particles {
         this.scene.add(this.mesh);
     }
 
-    async loadModel(modelUrl: string) {
-        const gltf = await new Promise<THREE.Object3D>((resolve, reject) => {
+    async loadModel(modelUrl: string, draco = false) {
+        this.isReady = false;
+
+        if (this.mesh) {
+            this.scene.remove(this.mesh);
+            this.mesh.geometry.dispose();
+            (this.mesh.material as THREE.Material).dispose();
+            this.mesh = undefined;
+        }
+
+        const loader = new GLTFLoader();
+        if (draco) {
             const dracoLoader = new DRACOLoader();
             dracoLoader.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.6/');
-            const loader = new GLTFLoader();
             loader.setDRACOLoader(dracoLoader);
-            loader.load(modelUrl, (g) => resolve(g.scene), undefined, reject);
-        });
+        }
 
-        const sampled = this.sampleGLBGeometry(gltf);
+        const gltf = await loader.loadAsync(modelUrl);
+        const sampled = this.sampleGLBGeometry(gltf.scene);
         this.setup(sampled);
 
-        // Scatter particles, then simulate
-        this.renderer.compute(this.computeInit);
+        await this.renderer.computeAsync(this.computeInit);
+        this.isReady = true;
     }
 
     update(deltaTime: number) {
+        if (!this.isReady) return;
+
         const delta = Math.min(deltaTime, 0.1);
         this.uTime.value += delta;
         this.updateMouse(delta);
