@@ -10,7 +10,7 @@ import {
 } from 'three/tsl';
 import type Canvas from './Canvas';
 
-const PARTICLE_COUNT = 10000;
+const PARTICLE_COUNT = 70000;
 const MOVE_TIMEOUT = 0.06;
 
 type GeometryData = {
