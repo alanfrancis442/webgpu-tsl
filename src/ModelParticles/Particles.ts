@@ -4,14 +4,18 @@ import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 import { MeshSurfaceSampler } from 'three/addons/math/MeshSurfaceSampler.js';
 import GUI from 'lil-gui';
 import {
-    Fn, uniform, float, vec3, int, clamp, pow, mix, sin, cos, dot, normalize,
-    instancedArray, instanceIndex, positionGeometry,
+    Fn, uniform, float, vec2, vec3, vec4, int, clamp, pow, mix, sin, cos, dot,
+    normalize, max, sqrt, oneMinus, uv, positionView, frameGroup,
+    cameraViewMatrix, cameraProjectionMatrix, modelViewMatrix,
+    instancedArray, instanceIndex, mrt, shadow,
     mx_noise_float, mx_fractal_noise_vec3,
 } from 'three/tsl';
 import type Canvas from './Canvas';
 
 const PARTICLE_COUNT = 70000;
 const MOVE_TIMEOUT = 0.06;
+const SHADOW_LAYER = 1;
+const SHADOW_RADIUS = 8;
 
 type GeometryData = {
     positions: Float32Array;
@@ -24,12 +28,11 @@ export default class Particles {
     private scene: THREE.Scene;
     private renderer: THREE.WebGPURenderer;
 
-    // GPU storage — positions written by compute each frame
     private positions!: THREE.StorageBufferNode<'vec3'>;
+    private prevPositions!: THREE.StorageBufferNode<'vec3'>;
     private targets!: THREE.StorageBufferNode<'vec3'>;
     private seeds!: THREE.StorageBufferNode<'float'>;
 
-    // Uniforms — noise
     private uTime!: THREE.UniformNode<'float', number>;
     private noiseAmp!: THREE.UniformNode<'float', number>;
     private noiseScale!: THREE.UniformNode<'float', number>;
@@ -38,10 +41,14 @@ export default class Particles {
     private maskScale!: THREE.UniformNode<'float', number>;
     private maskSpeed!: THREE.UniformNode<'float', number>;
     private maskContrast!: THREE.UniformNode<'float', number>;
-    private sphereSize!: THREE.UniformNode<'float', number>;
+    private particleSize!: THREE.UniformNode<'float', number>;
     private particleColor!: THREE.UniformNode<'color', THREE.Color>;
+    private shadowColor!: THREE.UniformNode<'color', THREE.Color>;
+    private shadowPower!: THREE.UniformNode<'float', number>;
+    private lightDirection!: THREE.UniformNode<'vec3', THREE.Vector3>;
+    private ambientStrength!: THREE.UniformNode<'float', number>;
+    private specularStrength!: THREE.UniformNode<'float', number>;
 
-    // Uniforms — mouse (CPU-driven, read in compute + material)
     private mousePos!: THREE.UniformNode<'vec3', THREE.Vector3>;
     private mouseVel!: THREE.UniformNode<'vec3', THREE.Vector3>;
     private mouseRadius!: THREE.UniformNode<'float', number>;
@@ -53,7 +60,6 @@ export default class Particles {
     private mouseGlowPow!: THREE.UniformNode<'float', number>;
     private mouseGlowEnergy!: THREE.UniformNode<'float', number>;
 
-    // CPU mouse state
     private raycaster = new THREE.Raycaster();
     private mouseNDC = new THREE.Vector2();
     private mousePlane = new THREE.Plane();
@@ -77,11 +83,13 @@ export default class Particles {
     private mouseLerp = 9.4;
     private mouseGlowDecay = 1.5;
 
-    // Compute passes
     private computeInit!: THREE.ComputeNode;
+    private computeCopyPrev!: THREE.ComputeNode;
     private computeUpdate!: THREE.ComputeNode;
 
-    private mesh?: THREE.InstancedMesh;
+    private light!: THREE.DirectionalLight;
+    private sprite?: THREE.Sprite;
+    private shadowSprite?: THREE.Sprite;
     private gui!: GUI;
     private isReady = false;
 
@@ -90,7 +98,8 @@ export default class Particles {
         this.scene = canvas.scene;
         this.renderer = canvas.renderer;
 
-        this.uTime = uniform(0);
+        // Per-frame sim uniforms on frameGroup (skill: drive clock from JS, not TSL time)
+        this.uTime = uniform(0).setGroup(frameGroup);
         this.noiseAmp = uniform(0.156);
         this.noiseScale = uniform(0.97);
         this.noiseSpeed = uniform(0.47);
@@ -98,11 +107,15 @@ export default class Particles {
         this.maskScale = uniform(0.72);
         this.maskSpeed = uniform(0.195);
         this.maskContrast = uniform(1.99);
-        this.sphereSize = uniform(0.01);
+        this.particleSize = uniform(0.04);
         this.particleColor = uniform(new THREE.Color(0x8aa0b8));
+        this.shadowColor = uniform(new THREE.Color(0x0a0c12));
+        this.shadowPower = uniform(3.0);
+        this.ambientStrength = uniform(0.35);
+        this.specularStrength = uniform(0.45);
 
-        this.mousePos = uniform(new THREE.Vector3());
-        this.mouseVel = uniform(new THREE.Vector3());
+        this.mousePos = uniform(new THREE.Vector3()).setGroup(frameGroup);
+        this.mouseVel = uniform(new THREE.Vector3()).setGroup(frameGroup);
         this.mouseRadius = uniform(1.45);
         this.mouseStrength = uniform(0.23);
         this.mouseScatter = uniform(0.21);
@@ -110,10 +123,42 @@ export default class Particles {
         this.mouseGlowPassive = uniform(0.0);
         this.mouseGlowActive = uniform(1.5);
         this.mouseGlowPow = uniform(2.0);
-        this.mouseGlowEnergy = uniform(0);
+        this.mouseGlowEnergy = uniform(0).setGroup(frameGroup);
+
+        const { light, lightDirection } = this.createShadowLight();
+        this.light = light;
+        this.lightDirection = uniform(lightDirection.clone());
+
+        this.renderer.shadowMap.enabled = true;
+        this.renderer.shadowMap.type = THREE.PCFShadowMap;
 
         this.initPointerInteraction();
         this.setupGUI();
+    }
+
+    private createShadowLight() {
+        const lightDirection = new THREE.Vector3(-0.5, 1, 0.25).normalize();
+        const light = new THREE.DirectionalLight(0xffffff, 1);
+        light.position.copy(lightDirection).multiplyScalar(SHADOW_RADIUS * 4);
+        light.target.position.set(0, 1.5, 0);
+        light.castShadow = true;
+
+        const bound = SHADOW_RADIUS * 3;
+        const cam = light.shadow.camera;
+        cam.left = -bound;
+        cam.right = bound;
+        cam.top = bound;
+        cam.bottom = -bound;
+        cam.near = SHADOW_RADIUS;
+        cam.far = SHADOW_RADIUS * 8;
+        cam.updateProjectionMatrix();
+        cam.layers.set(SHADOW_LAYER);
+
+        light.shadow.mapSize.set(1024, 1024);
+        light.shadow.radius = 12.8;
+        light.shadow.normalBias = 4;
+
+        return { light, lightDirection };
     }
 
     private initPointerInteraction() {
@@ -222,11 +267,21 @@ export default class Particles {
         mask.open();
 
         const appearance = this.gui.addFolder('Appearance');
-        appearance.add(this.sphereSize, 'value', 0.001, 0.1, 0.001).name('sphere size');
+        appearance.add(this.particleSize, 'value', 0.005, 0.2, 0.001).name('particle size');
+        appearance.add(this.ambientStrength, 'value', 0, 1, 0.01).name('ambient');
+        appearance.add(this.specularStrength, 'value', 0, 2, 0.01).name('specular');
         appearance.addColor({ color: '#8aa0b8' }, 'color').name('color').onChange((value: string) => {
             this.particleColor.value.set(value);
         });
         appearance.open();
+
+        const shadows = this.gui.addFolder('Shadows');
+        shadows.add(this.shadowPower, 'value', 0.5, 8, 0.01).name('power');
+        shadows.add(this.light.shadow, 'radius', 0, 24, 0.1).name('blur');
+        shadows.addColor({ color: '#0a0c12' }, 'color').name('color').onChange((value: string) => {
+            this.shadowColor.value.set(value);
+        });
+        shadows.open();
 
         const mouse = this.gui.addFolder('Mouse');
         mouse.add(this.mouseRadius, 'value', 0.1, 5, 0.01).name('radius');
@@ -265,10 +320,13 @@ export default class Particles {
         dofFolder.add(canvas.dofFocalLength, 'value', 0.1, 15, 0.1).name('focal length');
         dofFolder.add(canvas.dofBokehScale, 'value', 0, 5, 0.01).name('bokeh scale');
         dofFolder.open();
+
+        const blurFolder = this.gui.addFolder('Motion Blur');
+        blurFolder.add(canvas.blurAmount, 'value', 0, 2, 0.01).name('amount');
+        blurFolder.open();
     }
 
     private sampleGLBGeometry(gltf: THREE.Object3D): GeometryData {
-        // Normalise to a consistent bounding box (matches reference hologram sampler)
         const bbox = new THREE.Box3().setFromObject(gltf);
         const centre = new THREE.Vector3();
         bbox.getCenter(centre);
@@ -337,6 +395,21 @@ export default class Particles {
             box.expandByPoint(point);
         }
         box.getCenter(this.modelCenter);
+        this.light.target.position.copy(this.modelCenter);
+        this.light.position.copy(this.lightDirection.value).multiplyScalar(SHADOW_RADIUS * 4).add(this.modelCenter);
+    }
+
+    private disposeSprites() {
+        if (this.sprite) {
+            this.scene.remove(this.sprite);
+            (this.sprite.material as THREE.Material).dispose();
+            this.sprite = undefined;
+        }
+        if (this.shadowSprite) {
+            this.scene.remove(this.shadowSprite);
+            (this.shadowSprite.material as THREE.Material).dispose();
+            this.shadowSprite = undefined;
+        }
     }
 
     private setup(sampled: GeometryData) {
@@ -344,10 +417,12 @@ export default class Particles {
         this.computeModelCenter(sampled.positions);
 
         this.positions = instancedArray(PARTICLE_COUNT, 'vec3');
+        this.prevPositions = instancedArray(PARTICLE_COUNT, 'vec3');
         this.targets = instancedArray(sampledPositions, 'vec3');
         this.seeds = instancedArray(sampledSeeds, 'float');
 
         const positions = this.positions;
+        const prevPositions = this.prevPositions;
         const targets = this.targets;
         const seeds = this.seeds;
         const uTime = this.uTime;
@@ -358,8 +433,13 @@ export default class Particles {
         const maskScale = this.maskScale;
         const maskSpeed = this.maskSpeed;
         const maskContrast = this.maskContrast;
-        const sphereSize = this.sphereSize;
+        const particleSize = this.particleSize;
         const particleColor = this.particleColor;
+        const shadowColor = this.shadowColor;
+        const shadowPower = this.shadowPower;
+        const lightDirection = this.lightDirection;
+        const ambientStrength = this.ambientStrength;
+        const specularStrength = this.specularStrength;
         const mousePos = this.mousePos;
         const mouseVel = this.mouseVel;
         const mouseRadius = this.mouseRadius;
@@ -376,9 +456,17 @@ export default class Particles {
 
         this.computeInit = Fn(() => {
             const position = positions.element(instanceIndex);
+            const prev = prevPositions.element(instanceIndex);
             const target = targets.element(instanceIndex);
             position.assign(target);
-        })().compute(PARTICLE_COUNT);
+            prev.assign(target);
+        })().compute(PARTICLE_COUNT, [64]);
+
+        this.computeCopyPrev = Fn(() => {
+            const prev = prevPositions.element(instanceIndex);
+            const curr = positions.element(instanceIndex);
+            prev.assign(curr);
+        })().compute(PARTICLE_COUNT, [64]);
 
         this.computeUpdate = Fn(() => {
             const position = positions.element(instanceIndex);
@@ -438,16 +526,60 @@ export default class Particles {
                 .mul(falloff.mul(falloff));
 
             position.assign(blendPos.add(noiseDisp).add(mouseDisp));
-        })().compute(PARTICLE_COUNT);
+        })().compute(PARTICLE_COUNT, [64]);
 
-        const sphereGeometry = new THREE.IcosahedronGeometry(1, 0);
-        const material = new THREE.MeshStandardNodeMaterial();
+        const simPos = positions.toAttribute();
+        const simPrev = prevPositions.toAttribute();
+        const seedAttr = seeds.toAttribute();
+        const particleScale = seedAttr.mul(0.5).add(0.75).mul(particleSize);
 
-        material.positionNode = positions
-            .element(instanceIndex)
-            .add(positionGeometry.mul(sphereSize));
+        const clipParticleDisc = Fn(() => {
+            const p = uv().mul(2).sub(1);
+            const pFlip = vec2(p.x, p.y.negate()).toVar();
+            const r2 = dot(pFlip, pFlip);
+            r2.greaterThan(1.0).discard();
+            return pFlip;
+        });
 
+        const shadowMaterial = new THREE.SpriteNodeMaterial();
+        shadowMaterial.positionNode = simPos;
+        shadowMaterial.scaleNode = particleScale;
+        shadowMaterial.lights = false;
+        shadowMaterial.colorNode = Fn(() => {
+            clipParticleDisc();
+            return vec3(0);
+        })();
+
+        this.shadowSprite = new THREE.Sprite(shadowMaterial);
+        this.shadowSprite.count = PARTICLE_COUNT;
+        this.shadowSprite.frustumCulled = false;
+        // Sprite typings mark castShadow as always false; WebGPU still honors it for depth.
+        (this.shadowSprite as THREE.Object3D).castShadow = true;
+        this.shadowSprite.receiveShadow = false;
+        this.shadowSprite.layers.set(SHADOW_LAYER);
+
+        const shadowFactor = shadow(this.light) as unknown as THREE.Node<'float'>;
+
+        const material = new THREE.SpriteNodeMaterial();
+        material.positionNode = simPos;
+        material.scaleNode = particleScale;
+        material.lights = false;
         material.colorNode = Fn(() => {
+            const pFlip = clipParticleDisc();
+            const r2 = dot(pFlip, pFlip);
+            const normal = vec3(pFlip, sqrt(max(float(0), float(1).sub(r2))));
+
+            const lightDir = normalize(cameraViewMatrix.mul(vec4(lightDirection, 0)).xyz);
+            const viewDir = normalize(positionView.negate());
+
+            const NdotL = dot(normal, lightDir);
+            const diffuse = max(NdotL.mul(0.5).add(0.5), float(0));
+            const diffuseSq = diffuse.mul(diffuse);
+
+            const halfDir = normalize(lightDir.add(viewDir));
+            const specular = pow(max(dot(normal, halfDir), float(0)), float(48));
+            const fresnel = pow(oneMinus(max(dot(normal, viewDir), float(0))), float(1));
+
             const blendPos = targets.element(instanceIndex);
             const toMouse = mousePos.sub(blendPos);
             const mouseDist = toMouse.length();
@@ -460,22 +592,57 @@ export default class Particles {
             const passiveGlow = glowFalloff.mul(mouseGlowPassive);
             const activeGlow = glowFalloff.mul(mouseGlowEnergy).mul(mouseGlowActive);
             const glowFactor = clamp(passiveGlow.add(activeGlow), float(0), float(1));
-            return mix(particleColor, mouseGlowColor, glowFactor);
+            const baseColor = mix(particleColor, mouseGlowColor, glowFactor);
+            const albedo = vec3(baseColor).toVar();
+
+            const shadowMask = pow(shadowFactor, shadowPower);
+            const lit = albedo.mul(ambientStrength)
+                .add(
+                    albedo.mul(diffuseSq.mul(0.85))
+                        .add(vec3(1, 1, 1).mul(specular).mul(specularStrength))
+                        .add(albedo.mul(fresnel).mul(0.25))
+                        .mul(shadowMask),
+                )
+                .toVar();
+
+            // mix(lit, shadowedAlbedo, 1 - mask) without color-typed mix() overload
+            const shadowCol = shadowColor as unknown as THREE.Node<'vec3'>;
+            return lit.add(
+                shadowCol.mul(albedo).sub(lit).mul(oneMinus(shadowMask)),
+            );
         })();
 
-        this.mesh = new THREE.InstancedMesh(sphereGeometry, material, PARTICLE_COUNT);
-        this.mesh.frustumCulled = false;
-        this.scene.add(this.mesh);
+        material.mrtNode = mrt({
+            velocity: Fn(() => {
+                const currClip = cameraProjectionMatrix.mul(
+                    modelViewMatrix.mul(vec4(simPos.xyz, 1)),
+                );
+                const prevClip = cameraProjectionMatrix.mul(
+                    modelViewMatrix.mul(vec4(simPrev.xyz, 1)),
+                );
+                return currClip.xy.div(currClip.w).sub(prevClip.xy.div(prevClip.w));
+            })(),
+        });
+
+        this.sprite = new THREE.Sprite(material);
+        this.sprite.count = PARTICLE_COUNT;
+        this.sprite.frustumCulled = false;
+        this.sprite.castShadow = false;
+        this.sprite.receiveShadow = true;
+
+        this.scene.add(this.light);
+        this.scene.add(this.light.target);
+        this.scene.add(this.shadowSprite);
+        this.scene.add(this.sprite);
     }
 
     async loadModel(modelUrl: string, draco = false) {
         this.isReady = false;
+        this.disposeSprites();
 
-        if (this.mesh) {
-            this.scene.remove(this.mesh);
-            this.mesh.geometry.dispose();
-            (this.mesh.material as THREE.Material).dispose();
-            this.mesh = undefined;
+        if (this.light.parent) {
+            this.scene.remove(this.light);
+            this.scene.remove(this.light.target);
         }
 
         const loader = new GLTFLoader();
@@ -496,9 +663,12 @@ export default class Particles {
     update(deltaTime: number) {
         if (!this.isReady) return;
 
-        const delta = Math.min(deltaTime, 0.1);
+        // Cap catch-up after tab switch (skill: Math.min(delta * 60, 4))
+        const deltaFrames = Math.min(deltaTime * 60, 4);
+        const delta = deltaFrames / 60;
         this.uTime.value += delta;
         this.updateMouse(delta);
+        this.renderer.compute(this.computeCopyPrev);
         this.renderer.compute(this.computeUpdate);
     }
 }

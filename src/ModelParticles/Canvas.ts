@@ -1,7 +1,10 @@
 import * as THREE from 'three/webgpu';
-import { pass, uniform } from 'three/tsl';
+import {
+    pass, uniform, mrt, output, velocity, int,
+} from 'three/tsl';
 import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 import { dof } from 'three/addons/tsl/display/DepthOfFieldNode.js';
+import { motionBlur } from 'three/addons/tsl/display/MotionBlur.js';
 import { OrbitControls } from 'three/examples/jsm/Addons.js';
 import { HDRLoader } from 'three/examples/jsm/Addons.js';
 
@@ -21,6 +24,8 @@ export default class Canvas {
     dofFocus!: THREE.UniformNode<'float', number>;
     dofFocalLength!: THREE.UniformNode<'float', number>;
     dofBokehScale!: THREE.UniformNode<'float', number>;
+    blurAmount!: THREE.UniformNode<'float', number>;
+
     constructor() {
         this.element = document.createElement('canvas');
         this.element.classList.add('webgl');
@@ -33,7 +38,6 @@ export default class Canvas {
         this.createRender();
         this.setSizes();
         window.addEventListener('resize', () => {
-            console.log('resize');
             this.onResize();
         });
     }
@@ -42,7 +46,7 @@ export default class Canvas {
         this.dimensions = {
             width: window.innerWidth,
             height: window.innerHeight,
-            pixelRatio: Math.min(2, window.devicePixelRatio)
+            pixelRatio: Math.min(2, window.devicePixelRatio),
         };
         this.camera.aspect = window.innerWidth / window.innerHeight;
         this.camera.updateProjectionMatrix();
@@ -60,20 +64,19 @@ export default class Canvas {
     addHDRTexture() {
         const loader = new HDRLoader();
         loader.load('https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/the_sky_is_on_fire_1k.hdr', (texture) => {
-            // this.scene.background = texture;
             this.scene.environment = texture;
             this.scene.environment.mapping = THREE.EquirectangularReflectionMapping;
         });
     }
 
     setSizes() {
-        let fov = this.camera.fov * (Math.PI / 180);
-        let height = this.camera.position.z * Math.tan(fov / 2) * 2;
-        let width = height * this.camera.aspect;
+        const fov = this.camera.fov * (Math.PI / 180);
+        const height = this.camera.position.z * Math.tan(fov / 2) * 2;
+        const width = height * this.camera.aspect;
 
         this.sizes = {
-            width: width,
-            height: height
+            width,
+            height,
         };
     }
 
@@ -81,42 +84,28 @@ export default class Canvas {
         this.dimensions = {
             width: window.innerWidth,
             height: window.innerHeight,
-            pixelRatio: Math.min(2, window.devicePixelRatio)
+            pixelRatio: Math.min(2, window.devicePixelRatio),
         };
         this.renderer = new THREE.WebGPURenderer({
             canvas: this.element,
             alpha: false,
             antialias: false,
+            // Headroom for large particle storage buffers (70k+ vec3 × several arrays)
+            requiredLimits: {
+                maxBufferSize: 512 * 1024 * 1024,
+                maxStorageBufferBindingSize: 256 * 1024 * 1024,
+            },
         });
 
         this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
         this.renderer.toneMappingExposure = 1.0;
         this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+        this.renderer.shadowMap.enabled = true;
+        this.renderer.shadowMap.type = THREE.PCFShadowMap;
     }
 
     getTime() {
         return this.time;
-    }
-
-    addSimpleMesh() {
-        const geometry = new THREE.BoxGeometry();
-        const material = new THREE.MeshStandardMaterial({ color: 0x0077ff });
-        const cube = new THREE.Mesh(geometry, material);
-        this.scene.add(cube);
-    }
-
-    addLight() {
-        const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
-        this.scene.add(ambientLight);
-
-        const directionalLight = new THREE.DirectionalLight(0xffffff, 1.5);
-        directionalLight.position.set(5, 8, 10);
-        this.scene.add(directionalLight);
-    }
-
-    addGridHelper() {
-        const gridHelper = new THREE.GridHelper(10, 10);
-        this.scene.add(gridHelper);
     }
 
     addOrbitControls() {
@@ -126,25 +115,6 @@ export default class Canvas {
         this.controls.enableZoom = true;
         this.controls.enablePan = true;
         this.controls.update();
-    }
-
-    createDebugMesh() {
-        const mesh = new THREE.Mesh(
-            new THREE.PlaneGeometry(5, 5),
-            new THREE.MeshBasicMaterial({ color: 0xff0000, side: THREE.DoubleSide })
-        )
-
-        this.scene.add(mesh)
-    }
-
-    addDebugHelpers() {
-        // Add axes helper
-        const axesHelper = new THREE.AxesHelper(5);
-        this.scene.add(axesHelper);
-
-        // Add camera helper
-        const helper = new THREE.CameraHelper(this.camera);
-        this.scene.add(helper);
     }
 
     async init() {
@@ -159,15 +129,33 @@ export default class Canvas {
         this.renderPipeline = new THREE.RenderPipeline(this.renderer);
 
         const scenePass = pass(this.scene, this.camera);
+
+        const velocityBlend = new THREE.BlendMode(THREE.CustomBlending);
+        velocityBlend.blendSrc = THREE.OneFactor;
+        velocityBlend.blendDst = THREE.OneFactor;
+        velocityBlend.blendEquation = THREE.MaxEquation;
+
+        const sceneMrt = mrt({ output, velocity });
+        sceneMrt.setBlendMode('velocity', velocityBlend);
+        scenePass.setMRT(sceneMrt);
+
         const sceneColor = scenePass.getTextureNode('output');
+        const velocityTex = scenePass.getTextureNode('velocity');
         const viewZ = scenePass.getViewZNode();
 
+        this.blurAmount = uniform(0.52);
         this.dofFocus = uniform(9.0);
         this.dofFocalLength = uniform(2.5);
         this.dofBokehScale = uniform(1.2);
 
-        this.dofPass = dof(
+        const blurred = motionBlur(
             sceneColor,
+            velocityTex.mul(this.blurAmount),
+            int(8),
+        );
+
+        this.dofPass = dof(
+            blurred,
             viewZ,
             this.dofFocus,
             this.dofFocalLength,
@@ -176,17 +164,6 @@ export default class Canvas {
 
         this.bloomPass = bloom(this.dofPass, 0.4, 0.4, 0.1);
         this.renderPipeline.outputNode = (this.dofPass as unknown as typeof sceneColor).add(this.bloomPass);
-    }
-
-    getParticleRenderTarget(size: number) {
-        return new THREE.RenderTarget(size, size, {
-            minFilter: THREE.NearestFilter,
-            magFilter: THREE.NearestFilter,
-            format: THREE.RGBAFormat,
-            type: THREE.FloatType,
-            depthBuffer: false,
-            stencilBuffer: false,
-        });
     }
 
     render() {

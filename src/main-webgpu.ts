@@ -5,7 +5,6 @@ import Particles from './ModelParticles/Particles';
 const canvas = new Canvas();
 const particles = new Particles(canvas);
 
-canvas.addLight();
 canvas.addOrbitControls();
 
 await canvas.init();
